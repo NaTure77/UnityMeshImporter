@@ -37,8 +37,8 @@ namespace UnityMeshImporter
         private string meshName;
         private UnityEngine.Mesh mesh;
         private UnityEngine.Material material;
-        
-        private MeshMaterialBinding() {}    // Do not allow default constructor
+
+        private MeshMaterialBinding() { }    // Do not allow default constructor
 
         public MeshMaterialBinding(string meshName, Mesh mesh, Material material)
         {
@@ -51,19 +51,253 @@ namespace UnityMeshImporter
         public Material Material { get => material; }
         public string MeshName { get => meshName; }
     }
-    
+
+    public class MeshData
+    {
+        public Vector3[] vertices;
+        public int[] triangles;
+        public Vector3[] normals;
+        public Vector2[] uvs;
+        public UnityEngine.Material material;
+
+        public Vector3 localPosition;
+        public UnityEngine.Quaternion localRotation;
+        public Vector3 localScale;
+
+        public int materialIndex;
+    }
+    public class MaterialData
+    {
+        public Color color;
+        public Color emissionColor;
+        public bool HasColorEmissive = false;
+        public bool HasReflectivity = false;
+        public bool HasTextureDiffuse = false;
+        public Texture2D texture;
+    }
+
     public class MeshImporter
     {
-        public static GameObject Load(string meshPath, float scaleX=1, float scaleY=1, float scaleZ=1)
+        public static (List<MeshData> meshes, List<MaterialData> materials) LoadMeshData(string meshPath, float scaleX = 1, float scaleY = 1, float scaleZ = 1)
         {
-            if(!File.Exists(meshPath))
+            if (!File.Exists(meshPath))
+                return (null, null);
+
+            AssimpContext importer = new AssimpContext();
+            Scene scene = importer.ImportFile(meshPath);
+            if (scene == null)
+                return (null, null);
+
+            string parentDir = Directory.GetParent(meshPath).FullName;
+
+            // Materials
+
+            List<MaterialData> materialDatas = new List<MaterialData>();
+            //List<UnityEngine.Material> uMaterials = new List<Material>();
+            if (scene.HasMaterials)
+            {
+                foreach (var m in scene.Materials)
+                {
+                    //UnityEngine.Material uMaterial = new UnityEngine.Material(standardShader);
+                    MaterialData materialData = new MaterialData();
+                    // Albedo
+                    if (m.HasColorDiffuse)
+                    {
+                        Color color = new Color(
+                            m.ColorDiffuse.R,
+                            m.ColorDiffuse.G,
+                            m.ColorDiffuse.B,
+                            m.ColorDiffuse.A
+                        );
+                        materialData.color = color;
+                    }
+
+                    // Emission
+                    if (m.HasColorEmissive)
+                    {
+                        Color color = new Color(
+                            m.ColorEmissive.R,
+                            m.ColorEmissive.G,
+                            m.ColorEmissive.B,
+                            m.ColorEmissive.A
+                        );
+                        materialData.HasColorEmissive = true;
+                        materialData.emissionColor = color;
+                        //uMaterial.SetColor("_EmissionColor", color);
+                        //uMaterial.EnableKeyword("_EMISSION");
+                    }
+
+                    // Reflectivity
+                    if (m.HasReflectivity)
+                    {
+                        materialData.HasReflectivity = true;
+                        //uMaterial.SetFloat("_Glossiness", m.Reflectivity);
+                    }
+
+                    // Texture
+                    if (m.HasTextureDiffuse)
+                    {
+                        materialData.HasTextureDiffuse = true;
+                        Texture2D uTexture = new Texture2D(2, 2);
+                        string texturePath = Path.Combine(parentDir, m.TextureDiffuse.FilePath);
+
+                        UnityEngine.Debug.Log(texturePath);
+                        byte[] byteArray = File.ReadAllBytes(texturePath);
+                        bool isLoaded = uTexture.LoadImage(byteArray);
+                        if (!isLoaded)
+                        {
+                            throw new Exception("Cannot find texture file: " + texturePath);
+                        }
+
+                        materialData.texture = uTexture;
+                        //uMaterial.SetTexture("_MainTex", uTexture);
+                    }
+
+                    materialDatas.Add(materialData);
+                }
+            }
+
+            // Mesh
+            //List<MeshMaterialBinding> uMeshAndMats = new List<MeshMaterialBinding>();
+
+            List<MeshData> meshDatas = new List<MeshData>();
+            if (scene.HasMeshes)
+            {
+                foreach (var m in scene.Meshes)
+                {
+                    List<Vector3> uVertices = new List<Vector3>();
+                    List<Vector3> uNormals = new List<Vector3>();
+                    List<Vector2> uUv = new List<Vector2>();
+                    List<int> uIndices = new List<int>();
+
+                    // Vertices
+                    if (m.HasVertices)
+                    {
+                        foreach (var v in m.Vertices)
+                        {
+                            uVertices.Add(new Vector3(-v.X, v.Y, v.Z));
+                        }
+                    }
+
+                    // Normals
+                    if (m.HasNormals)
+                    {
+                        foreach (var n in m.Normals)
+                        {
+                            uNormals.Add(new Vector3(-n.X, n.Y, n.Z));
+                        }
+                    }
+
+                    // Triangles
+                    if (m.HasFaces)
+                    {
+                        foreach (var f in m.Faces)
+                        {
+                            // Ignore degenerate faces
+                            if (f.IndexCount == 1 || f.IndexCount == 2)
+                                continue;
+
+                            for (int i = 0; i < (f.IndexCount - 2); i++)
+                            {
+                                uIndices.Add(f.Indices[i + 2]);
+                                uIndices.Add(f.Indices[i + 1]);
+                                uIndices.Add(f.Indices[0]);
+                            }
+                        }
+                    }
+
+                    // Uv (texture coordinate) 
+                    if (m.HasTextureCoords(0))
+                    {
+                        foreach (var uv in m.TextureCoordinateChannels[0])
+                        {
+                            uUv.Add(new Vector2(uv.X, uv.Y));
+                        }
+                    }
+
+                    MeshData meshData = new MeshData();
+                    meshData.vertices = uVertices.ToArray();
+                    meshData.normals = uNormals.ToArray();
+                    meshData.triangles = uIndices.ToArray();
+                    meshData.uvs = uUv.ToArray();
+
+                    meshDatas.Add(meshData);
+                }
+            }
+
+            // Create GameObjects from nodes
+            void NodeToGameObject(Node node)
+            {
+                //GameObject uOb = new GameObject(node.Name);
+
+                // Set Mesh
+                /*if (node.HasMeshes)
+                {
+                    foreach (var mIdx in node.MeshIndices)
+                    {
+                        var uMeshAndMat = uMeshAndMats[mIdx];
+
+                        GameObject uSubOb = new GameObject(uMeshAndMat.MeshName);
+                        uSubOb.AddComponent<MeshFilter>();
+                        uSubOb.AddComponent<MeshRenderer>();
+                        uSubOb.AddComponent<MeshCollider>();
+
+                        uSubOb.GetComponent<MeshFilter>().mesh = uMeshAndMat.Mesh;
+                        uSubOb.GetComponent<MeshRenderer>().material = uMeshAndMat.Material;
+                        uSubOb.transform.SetParent(uOb.transform, true);
+                        uSubOb.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
+                    }
+                }*/
+
+                // Transform
+                // Decompose Assimp transform into scale, rot and translaction 
+                Assimp.Vector3D aScale = new Assimp.Vector3D();
+                Assimp.Quaternion aQuat = new Assimp.Quaternion();
+                Assimp.Vector3D aTranslation = new Assimp.Vector3D();
+                node.Transform.Decompose(out aScale, out aQuat, out aTranslation);
+
+                // Convert Assimp transfrom into Unity transform and set transformation of game object 
+                UnityEngine.Quaternion uQuat = new UnityEngine.Quaternion(aQuat.X, aQuat.Y, aQuat.Z, aQuat.W);
+                var euler = uQuat.eulerAngles;
+                UnityEngine.Vector3 localScale = new UnityEngine.Vector3(aScale.X, aScale.Y, aScale.Z);
+                UnityEngine.Vector3 localPosition = new UnityEngine.Vector3(aTranslation.X, aTranslation.Y, aTranslation.Z);
+                UnityEngine.Quaternion localRotation = UnityEngine.Quaternion.Euler(euler.x, -euler.y, euler.z);
+
+
+                if (node.HasMeshes)
+                {
+                    foreach (var mIdx in node.MeshIndices)
+                    {
+                        MeshData meshData = meshDatas[mIdx];
+                        meshData.localPosition = localPosition;
+                        meshData.localScale = localScale;
+                        meshData.localRotation = localRotation;
+                    }
+                }
+
+
+                if (node.HasChildren)
+                {
+                    foreach (var cn in node.Children)
+                    {
+                        NodeToGameObject(cn);
+                    }
+                }
+            }
+            NodeToGameObject(scene.RootNode);
+
+            return (meshDatas, materialDatas);
+        }
+        public static GameObject Load(string meshPath, float scaleX = 1, float scaleY = 1, float scaleZ = 1)
+        {
+            if (!File.Exists(meshPath))
                 return null;
 
             AssimpContext importer = new AssimpContext();
             Scene scene = importer.ImportFile(meshPath);
             if (scene == null)
                 return null;
-            
+
             string parentDir = Directory.GetParent(meshPath).FullName;
 
             // Materials
@@ -98,26 +332,26 @@ namespace UnityMeshImporter
                         uMaterial.SetColor("_EmissionColor", color);
                         uMaterial.EnableKeyword("_EMISSION");
                     }
-                    
+
                     // Reflectivity
                     if (m.HasReflectivity)
                     {
                         uMaterial.SetFloat("_Glossiness", m.Reflectivity);
                     }
-                    
+
                     // Texture
                     if (m.HasTextureDiffuse)
                     {
-                        Texture2D uTexture = new Texture2D(2,2);
+                        Texture2D uTexture = new Texture2D(2, 2);
                         string texturePath = Path.Combine(parentDir, m.TextureDiffuse.FilePath);
-                        
+
                         byte[] byteArray = File.ReadAllBytes(texturePath);
                         bool isLoaded = uTexture.LoadImage(byteArray);
                         if (!isLoaded)
                         {
                             throw new Exception("Cannot find texture file: " + texturePath);
                         }
-                        
+
                         uMaterial.SetTexture("_MainTex", uTexture);
                     }
 
@@ -135,7 +369,7 @@ namespace UnityMeshImporter
                     List<Vector3> uNormals = new List<Vector3>();
                     List<Vector2> uUv = new List<Vector2>();
                     List<int> uIndices = new List<int>();
-                
+
                     // Vertices
                     if (m.HasVertices)
                     {
@@ -163,10 +397,10 @@ namespace UnityMeshImporter
                             if (f.IndexCount == 1 || f.IndexCount == 2)
                                 continue;
 
-                            for(int i=0;i<(f.IndexCount-2);i++)
+                            for (int i = 0; i < (f.IndexCount - 2); i++)
                             {
-                                uIndices.Add(f.Indices[i+2]);
-                                uIndices.Add(f.Indices[i+1]);
+                                uIndices.Add(f.Indices[i + 2]);
+                                uIndices.Add(f.Indices[i + 1]);
                                 uIndices.Add(f.Indices[0]);
                             }
                         }
@@ -180,7 +414,7 @@ namespace UnityMeshImporter
                             uUv.Add(new Vector2(uv.X, uv.Y));
                         }
                     }
-                
+
                     UnityEngine.Mesh uMesh = new UnityEngine.Mesh();
                     uMesh.vertices = uVertices.ToArray();
                     uMesh.normals = uNormals.ToArray();
@@ -190,31 +424,31 @@ namespace UnityMeshImporter
                     uMeshAndMats.Add(new MeshMaterialBinding(m.Name, uMesh, uMaterials[m.MaterialIndex]));
                 }
             }
-            
+
             // Create GameObjects from nodes
             GameObject NodeToGameObject(Node node)
             {
                 GameObject uOb = new GameObject(node.Name);
-            
+
                 // Set Mesh
                 if (node.HasMeshes)
                 {
                     foreach (var mIdx in node.MeshIndices)
                     {
                         var uMeshAndMat = uMeshAndMats[mIdx];
-                        
+
                         GameObject uSubOb = new GameObject(uMeshAndMat.MeshName);
                         uSubOb.AddComponent<MeshFilter>();
                         uSubOb.AddComponent<MeshRenderer>();
                         uSubOb.AddComponent<MeshCollider>();
-                    
+
                         uSubOb.GetComponent<MeshFilter>().mesh = uMeshAndMat.Mesh;
                         uSubOb.GetComponent<MeshRenderer>().material = uMeshAndMat.Material;
                         uSubOb.transform.SetParent(uOb.transform, true);
                         uSubOb.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
                     }
                 }
-            
+
                 // Transform
                 // Decompose Assimp transform into scale, rot and translaction 
                 Assimp.Vector3D aScale = new Assimp.Vector3D();
@@ -228,7 +462,7 @@ namespace UnityMeshImporter
                 uOb.transform.localScale = new UnityEngine.Vector3(aScale.X, aScale.Y, aScale.Z);
                 uOb.transform.localPosition = new UnityEngine.Vector3(aTranslation.X, aTranslation.Y, aTranslation.Z);
                 uOb.transform.localRotation = UnityEngine.Quaternion.Euler(euler.x, -euler.y, euler.z);
-            
+
                 if (node.HasChildren)
                 {
                     foreach (var cn in node.Children)
@@ -237,11 +471,11 @@ namespace UnityMeshImporter
                         uObChild.transform.SetParent(uOb.transform, false);
                     }
                 }
-            
+
                 return uOb;
             }
-            
-            return NodeToGameObject(scene.RootNode);;
+
+            return NodeToGameObject(scene.RootNode); ;
         }
     }
 }
